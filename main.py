@@ -2,7 +2,9 @@ from algosdk import mnemonic, account, transaction
 from algosdk.account import address_from_private_key
 from algosdk.v2client import algod
 import time
+import random
 import ssl
+import traceback
 
 
 # Create an Algod client
@@ -71,6 +73,21 @@ def generate_new_account():
 def contribute_to_stokvel(algod_client, private_key, address, stokvel):
     try:
         amount = float(input(f"Enter contribution amount to '{stokvel['name']}' (in Algos): ").strip()) * 1e6
+        receiver_address = hardcoded_stokvel_account["address"]  # Contributions go to Stokvel group account
+        params = algod_client.suggested_params()
+        unsigned_txn = transaction.PaymentTxn(address, params, receiver_address, int(amount))
+        signed_txn = unsigned_txn.sign(private_key)
+        tx_id = algod_client.send_transaction(signed_txn)
+        wait_for_confirmation(algod_client, tx_id)
+
+        # Update contributions in Stokvel
+        stokvel["contributions"][address] = stokvel["contributions"].get(address, 0) + amount / 1e6
+        print(f"Contribution successful! {amount / 1e6} Algos added to Stokvel '{stokvel['name']}'.")
+    except Exception as e:
+        print(f"Error during contribution: {e}")
+
+def contribute_to_stokvelsim(algod_client, private_key, address, stokvel,amount):
+    try:
         receiver_address = hardcoded_stokvel_account["address"]  # Contributions go to Stokvel group account
         params = algod_client.suggested_params()
         unsigned_txn = transaction.PaymentTxn(address, params, receiver_address, int(amount))
@@ -162,7 +179,116 @@ def payout_from_stokvel(algod_client, stokvel,Multisig):
     except Exception as e:
         print(f"Error during payout: {e}")
 
+def get_mnemonic_by_address(address, accounts_list):
+    """Helper function to get mnemonic from hardcoded_accounts list"""
+    for account in accounts_list:
+        if account["address"] == address:
+            return account["mnemonic"]
+    return None
 
+
+def simulate_stokvel_cycle(algod_client, multisig, stokvel_group):
+    try:
+        print(f"Simulating 5-month cycle.")
+
+        # Get stokvel members from the group
+        stokvel_members = stokvel_group["members"]
+        print(f"stokvel_members: {stokvel_members}")
+
+        # Simulate the cycle for 5 months
+        for month in range(1, 6):
+            print(f"\n--- Month {month} ---")
+
+            # Step 1: All members contribute their monthly deposit
+            deposit_amount = 1 * 1000000  # 1 Algo in microAlgos
+            for member_address in stokvel_members:
+                try:
+                    print(f"Processing deposit for member: {member_address}")
+
+                    # Get mnemonic from the global hardcoded_accounts list
+                    mnemonic_phrase = get_mnemonic_by_address(member_address, hardcoded_accounts)
+
+                    if mnemonic_phrase:
+                        # Correctly use mnemonic.to_private_key as a function
+                        private_key = mnemonic.to_private_key(mnemonic_phrase)
+                        contribute_to_stokvelsim(
+                            algod_client,
+                            private_key,
+                            member_address,
+                            stokvel_group,
+                            deposit_amount
+                        )
+                        print(f"Member {member_address} deposited 1 Algo.")
+                    else:
+                        print(f"Could not find mnemonic for member {member_address}")
+
+                except Exception as e:
+                    print(f"Error processing deposit for {member_address}: {e}")
+                    traceback.print_exc()  # Added to show full error trace
+                    continue
+
+            # Step 2: Select member for this month's payout
+            selected_member = stokvel_members[month - 1]  # Sequential selection
+            payout_amount = int(0.60 * deposit_amount * 5)  # 60% of total deposits
+            print(f"\nSelected member for payout: {selected_member}")
+            print(f"Payout amount: {payout_amount / 1000000} Algos")
+
+            # Step 3: Collect authorizations
+            authorized_members = 0
+            authorized_addresses = []
+
+            for member in stokvel_members:
+                authorization = input(f"Authorize payout to {selected_member}? (y/n): ").strip().lower()
+                if authorization == 'y':
+                    authorized_addresses.append(member)
+                    authorized_members += 1
+                if authorized_members >= 4:
+                    print("Sufficient authorizations received. Proceeding with payout.")
+                    break
+
+            if authorized_members < 4:
+                print("Not enough authorizations received. Skipping payout.")
+                continue
+
+            # Step 4: Process payout
+            try:
+                msig_account_address = multisig.address()
+                sp = algod_client.suggested_params()
+
+                # Create and sign multisig transaction
+                msig_pay = transaction.PaymentTxn(
+                    msig_account_address,
+                    sp,
+                    selected_member,
+                    payout_amount
+                )
+
+                msig_txn = transaction.MultisigTransaction(msig_pay, multisig)
+
+                # Sign with authorized members
+                for auth_address in authorized_addresses[:4]:  # Use first 4 authorizations
+                    member_mnemonic = get_mnemonic_by_address(auth_address, hardcoded_accounts)
+                    if member_mnemonic:
+                        private_key = mnemonic.to_private_key(member_mnemonic)
+                        msig_txn.sign(private_key)
+
+                # Send transaction
+                txid = algod_client.send_transaction(msig_txn)
+                wait_for_confirmation(algod_client, txid)
+                print(f"Payout of {payout_amount / 1000000} Algos to {selected_member} confirmed.")
+
+            except Exception as e:
+                print(f"Error processing payout: {e}")
+                traceback.print_exc()  # Added to show full error trace
+                continue
+
+            print(f"End of Month {month} completed.")
+
+        print("\n5-month cycle completed successfully.")
+
+    except Exception as e:
+        print(f"Critical error in simulation: {e}")
+        traceback.print_exc()
 # Wait for transaction confirmation
 def wait_for_confirmation(client, txid, timeout=10):
     start_time = time.time()
@@ -217,7 +343,8 @@ def main():
         print("2. View Stokvel Status")
         print("3. Transfer Funds")
         print("4. Payout from Stokvel")
-        print("5. Exit")
+        print("5. Simulate Payout from Stokvel for 5 months")
+        print("6. Exit")
         option = input("Select an option: ").strip()
         if option == "1":
             contribute_to_stokvel(algod_client, private_key, address, hardcoded_stokvel_group)
@@ -230,6 +357,8 @@ def main():
         elif option == "4":
             payout_from_stokvel(algod_client, hardcoded_stokvel_group,msig)
         elif option == "5":
+            simulate_stokvel_cycle(algod_client, msig, hardcoded_stokvel_group)
+        elif option == "6":
             break
         else:
             print("Invalid option, please try again.")
