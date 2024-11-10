@@ -1,17 +1,16 @@
 from algosdk import mnemonic, account, transaction
+from algosdk.account import address_from_private_key
 from algosdk.v2client import algod
 import time
 import ssl
 
-# Create an Algod client
+
 # Create an Algod client
 def create_algod_client():
     algod_address = "https://testnet-api.algonode.cloud"
     algod_token = ""
     algod_client = algod.AlgodClient(algod_token, algod_address)  # Removed ssl_context
     return algod_client
-
-
 # Hardcoded accounts (with provided mnemonics)
 hardcoded_accounts = [
     {
@@ -38,14 +37,11 @@ hardcoded_accounts = [
 
 # Hardcoded Stokvel account
 hardcoded_stokvel_account = {
-    "address": "CGOFMXFPAE4KGJ6OMMPPFN2WFFFTVOZAR456FU4Y3NUXA4LTEOFUCV7U2A",
-    "mnemonic": "eternal sadness coral render odor hen brand occur hundred bottom trouble jaguar brass uncle mistake whip bitter loan raise dumb weapon vintage have absorb spell"
 }
 
 # Hardcoded Stokvel group with 5 members
 hardcoded_stokvel_group = {
     "name": "Community Stokvel",
-    "goal": 1000.0,  # Goal in Algos
     "members": [
         hardcoded_accounts[0]["address"],
         hardcoded_accounts[1]["address"],
@@ -62,12 +58,14 @@ hardcoded_stokvel_group = {
     }
 }
 
+
 # Create a new Algorand account
 def generate_new_account():
     private_key, address = account.generate_account()
     mnemonic_phrase = mnemonic.from_private_key(private_key)
     print(f"New Account Created\nAddress: {address}\nMnemonic: {mnemonic_phrase}")
     return private_key, address
+
 
 # Contribute to Stokvel
 def contribute_to_stokvel(algod_client, private_key, address, stokvel):
@@ -86,17 +84,84 @@ def contribute_to_stokvel(algod_client, private_key, address, stokvel):
     except Exception as e:
         print(f"Error during contribution: {e}")
 
+
 # View Stokvel status
 def view_stokvel_status(stokvel):
-    total_contributions = sum(stokvel["contributions"].values())
     print(f"\nStokvel '{stokvel['name']}' Status:")
-    print(f" - Goal: {stokvel['goal']} Algos")
-    print(f" - Total Contributions: {total_contributions} Algos")
     print(" - Members and their Contributions:")
     for member, contribution in stokvel["contributions"].items():
         print(f"   {member}: {contribution} Algos")
-    if total_contributions >= stokvel["goal"]:
-        print("Goal achieved! Ready for payout.")
+
+
+# Transfer funds between two members
+def transfer_funds(algod_client, private_key, from_address, to_address, amount):
+    try:
+        amount_micro = amount * 1e6  # Convert Algos to microAlgos
+        params = algod_client.suggested_params()
+        unsigned_txn = transaction.PaymentTxn(from_address, params, to_address, int(amount_micro))
+        signed_txn = unsigned_txn.sign(private_key)
+        tx_id = algod_client.send_transaction(signed_txn)
+        wait_for_confirmation(algod_client, tx_id)
+        print(f"Transferred {amount} Algos from {from_address} to {to_address}.")
+    except Exception as e:
+        print(f"Error during fund transfer: {e}")
+
+#payout from stokvel
+def payout_from_stokvel(algod_client, stokvel,Multisig):
+    try:
+        print(f"Payout from Stokvel '{stokvel['name']}' initiated.")
+
+        # Amount to be paid out (e.g., 1 Algo)
+        payout_amount = 1000000  # 1 Algo = 1,000,000 microAlgos
+
+        # Collect authorizations from members
+        authorized_members = 0
+        authorized_addresses = []  # Store authorized member addresses
+
+        for member in stokvel["members"]:
+            authorization = input(f"Authorize payout for {member} (y/n): ").strip().lower()
+            if authorization == 'y':
+                authorized_addresses.append(member)
+                authorized_members += 1
+            if authorized_members >= 4:
+                print("Sufficient authorizations received. Proceeding with the payout.")
+                break
+        else:
+            print("Error: Not enough authorizations. At least 4 members must approve the payout.")
+            return
+
+        # Use the existing multisig account for the payout transaction
+        msig_account_address = "4GK46635MKFBCOPAY2BFC5MDOVRDLQ6YFJ2VAI5GOPWSBNHIMDGCP3E6XY"  # This is just the address
+        sp = algod_client.suggested_params()
+
+        # Create the payment transaction
+        msig_pay = transaction.PaymentTxn(
+            msig_account_address,  # Use the address directly
+            sp,
+            authorized_addresses[0],  # For demonstration, send to the first authorized member
+            payout_amount,
+            close_remainder_to=authorized_addresses[0]  # Optionally close remainder to the first address
+        )
+
+
+        # Wrap the payment transaction inside the multisig transaction
+        msig_txn = transaction.MultisigTransaction(msig_pay,Multisig)
+
+        # Sign the transaction with the authorized signers of the Stokvel account
+        for account in hardcoded_accounts:
+            private_key = mnemonic.to_private_key(account["mnemonic"])
+            msig_txn.sign(private_key)
+
+        # Send the transaction
+        txid = algod_client.send_transaction(msig_txn)
+
+        # Wait for the transaction to be confirmed
+        result = transaction.wait_for_confirmation(algod_client, txid, 4)
+        print(f"Payout made from Stokvel account confirmed in round {result['confirmed-round']}")
+
+    except Exception as e:
+        print(f"Error during payout: {e}")
+
 
 # Wait for transaction confirmation
 def wait_for_confirmation(client, txid, timeout=10):
@@ -114,6 +179,7 @@ def wait_for_confirmation(client, txid, timeout=10):
             raise Exception("Transaction confirmation timeout.")
         time.sleep(1)
 
+
 # Main menu
 def main():
     algod_client = create_algod_client()
@@ -125,42 +191,49 @@ def main():
         print("1. Generate a new account")
         print("2. Use a hardcoded account")
         choice = input("Select an option (1 or 2): ").strip()
-        if choice == '1':
+        if choice == "1":
             private_key, address = generate_new_account()
-        elif choice == '2':
-            for idx, acc in enumerate(hardcoded_accounts):
-                print(f"{idx + 1}. Address: {acc['address']}")
-            selected = int(input("Select an account: ")) - 1
-            private_key = mnemonic.to_private_key(hardcoded_accounts[selected]["mnemonic"])
-            address = hardcoded_accounts[selected]["address"]
+        elif choice == "2":
+            private_key = mnemonic.to_private_key(hardcoded_accounts[0]["mnemonic"])
+            address = hardcoded_accounts[0]["address"]
+            multisig_accounts = [
+                "4MMK35CO2ISYD4TPY5ZRUWNDUJ3MXCIM6AVGNNEBZWD2VCZM4E4JVX2CF4",
+                "YRQFF5PSX2HS6PZ75TWAISFST2XROUVYUQRPK5ZXU7SNN7QWGTBPFJXSSQ",
+                "VI7NU5WFYUPOKPSC3RGY7OZNWK3YHSZF4D5Y3S2XBCLJG5UY6Y4K3D2PU4",
+                "VKAWCU7XS2WG7KU5N2XAR5UU5SQGJUGIBMUQ25KYW6K4WMCRQQAUPGA3VU",
+                "BMSL2ZRZJ2DXNSVKDZITFRUFNOO24BIQHV2DDVI7SM3UW5B5RQH3KQZ7NI"
+            ]
+            msig = transaction.Multisig(1, 4, multisig_accounts)
+            hardcoded_stokvel_account["address"] = msig.address()
+            print("Multisig Address: ", msig.address())
+            print(f"Using hardcoded account: {address}")
         else:
-            print("Invalid choice. Please select 1 or 2.")
+            print("Invalid choice, please try again.")
 
-    # Main menu
+    # Stokvel system menu
     while True:
-        print("\n--- Stokvel Main Menu ---")
-        print("1. Create Stokvel group")
-        print("2. Contribute to a Stokvel group")
-        print("3. View Stokvel group status")
+        print("\n--- Stokvel Management ---")
+        print("1. Contribute to Stokvel")
+        print("2. View Stokvel Status")
+        print("3. Transfer Funds")
         print("4. Payout from Stokvel")
         print("5. Exit")
-        option = input("Select an option (1-5): ").strip()
-
-        if option == '1':
-            print("Stokvel group already created.")
-        elif option == '2':
-            print("Contribute to the Stokvel group (address):", hardcoded_stokvel_account['address'])
+        option = input("Select an option: ").strip()
+        if option == "1":
             contribute_to_stokvel(algod_client, private_key, address, hardcoded_stokvel_group)
-        elif option == '3':
-            print("Stokvel group (address):", hardcoded_stokvel_account['address'])
+        elif option == "2":
             view_stokvel_status(hardcoded_stokvel_group)
-        elif option == '4':
-            print("Payout functionality not implemented.")
-        elif option == '5':
-            print("Exiting...")
+        elif option == "3":
+            to_address = input("Enter recipient address: ").strip()
+            amount = float(input("Enter amount to transfer: ").strip())
+            transfer_funds(algod_client, private_key, address, to_address, amount)
+        elif option == "4":
+            payout_from_stokvel(algod_client, hardcoded_stokvel_group,msig)
+        elif option == "5":
             break
         else:
-            print("Invalid option. Please select a number between 1 and 5.")
+            print("Invalid option, please try again.")
+
 
 if __name__ == "__main__":
     main()
